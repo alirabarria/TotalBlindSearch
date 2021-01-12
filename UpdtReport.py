@@ -24,7 +24,8 @@ class UpdtReport:
                  report_geometry={"tmargin": "0.5cm", "lmargin": "2.5cm", "bmargin": "0.5cm"},
                  data_header=['TELESCOP', 'INSTRUME', 'OBJECT', 'DATE'], vmin=1, vmax =3, fig_atom_size = (5,3),
                  using_harps=False, loggf_table_filter = -100, fig_atom_width = '15cm', depth_table_filter=0,
-                 number_table_filter = 10, resume_fwhm = True, fig_appendix ='8cm', app_filename = 'appendix'
+                 number_table_filter = 10, resume_fwhm = True, fig_appendix ='8cm', app_filename = 'appendix',
+                 read_fits = True
                  ):
         self.str_adress = str_adress
         self.log_cols = ['elem', 'obs_wv', 'fwhm', 'fwhm_pix', 'status', 'detection', 'warning', 'all_ok', 'log_gf', 'band',
@@ -46,7 +47,7 @@ class UpdtReport:
                         'raw_data_directory': raw_data_directory, 'vmin':vmin, 'vmax':vmax, 'fig_atom_size':fig_atom_size,
                         'loggf_table_filter': loggf_table_filter, 'fig_atom_width': fig_atom_width,
                         'depth_table_filter': depth_table_filter, 'number_table_filter': number_table_filter,
-                        'fig_appendix': fig_appendix, 'app_filename': app_filename
+                        'fig_appendix': fig_appendix, 'app_filename': app_filename, 'read_fits': read_fits
 
         }
 
@@ -245,14 +246,7 @@ class UpdtReport:
 
         return str_elem[:-1] + add
 
-    def _get_data_info(self, for_header, using_harps=False):
-        """
-        This function loads the param log to list it on the report
-        :param self:
-        :param for_header:
-        :param using_harps:
-        :return:
-        """
+    def _get_data_folder(self):
         data_folder = self._params['raw_data_directory']
         split_adress = self.str_adress.split('/')
         if len(split_adress) > 2:
@@ -263,6 +257,19 @@ class UpdtReport:
             adress = data_folder + 'log_fits/' + aux_split_adress
         else:
             adress = data_folder + aux_split_adress
+        return adress
+
+
+
+    def _get_data_info(self, for_header, using_harps=False):
+        """
+        This function loads the param log to list it on the report
+        :param self:
+        :param for_header:
+        :param using_harps:
+        :return:
+        """
+        adress = self._get_data_folder()
         db = list_archives(adress)
         header = fits.getheader(db[0])
         result = []
@@ -491,10 +498,13 @@ class UpdtReport:
                     #parameters used in this run
                     params_data = self.params_data.sort_index()
                     header_row = ['Parameter name', 'Value']
+                    needed_param = ['orders', 'telescope', 'cut_order']
                     with doc.create(pl.LongTabu("X[c] X[c]")) as table:
                         table.add_row(header_row, mapper=[bold])
                         table.add_hline()
                         for param, value in zip(params_data.index.values, params_data.values):
+                            if param in needed_param:
+                                self._params[param] = value[0]
                             if param != 'dlambda_analyze':
                                 table.add_row(param, value[0])
                                 table.add_hline()
@@ -758,6 +768,36 @@ class UpdtReport:
             snr_epoch = one_band_data['std_residuals'].values
             one_band_data['snr_epoch'] = 1 / snr_epoch
             snr_epoch = one_band_data['snr_epoch'].values
+            if self._params['read_fits'] and not (self._params['telescope'] in ['uves', 'harps']):
+                self._ranges = []
+                self.orders_length = []
+                array_files = np.array(list_archives(self._get_data_folder()))
+                for order in range(int(self._params['orders'])):
+                    if self._params['telescope'] == 'keck':
+                        wave, data, error = openFile(array_files[0], order, orders_together=False,
+                                                     using_keck=True)
+                    elif self._params['telescope'] == 'uves':
+                        from astropy.io import fits
+                        data = fits.open(array_files[0])
+                        wave = np.array(data[1].data[0])[0]
+                    else:
+                        from pyspeckit import Spectrum
+                        data = Spectrum(str(array_files[0]))
+                        wave = np.array(data[order].xarr)
+                    cut_order = int(self._params['cut_order'])
+                    self._ranges.append([wave[cut_order], wave[len(wave) - cut_order - 1]])
+                    self.orders_length.append([abs(wave[cut_order] - wave[cut_order + 1]),
+                                               abs(wave[len(wave) - cut_order - 2] - wave[len(wave) - cut_order - 1])])
+
+                orders_length = np.array(self.orders_length)
+                for index, row in one_band_data.iterrows():
+                    wv = row['obs_wv']
+                    mask_wv = np.array([wv_lims[0] < wv and wv < wv_lims[1] for wv_lims in self._ranges])
+                    wv_delta = np.mean(orders_length[mask_wv])
+                    one_band_data.at[index, 'snr_epoch'] = row['snr_epoch']/np.sqrt(wv_delta)
+
+
+
             with doc.create(pl.Section('Noise analysis')):
                 fig = plt.figure(figsize=(10, 7))
                 ax = fig.add_subplot(111)
@@ -772,6 +812,7 @@ class UpdtReport:
                 fwhm = one_band_data['fwhm'].values
                 fwhm_pix = one_band_data['fwhm_pix'].values
                 snr = one_band_data['snr'].values
+                snr_epoch = one_band_data['snr_epoch'].values
                 scnd_filter = [aux < 100 for aux in fwhm_pix]
                 fwhm = fwhm[scnd_filter]
                 fwhm_pix = fwhm_pix[scnd_filter]
